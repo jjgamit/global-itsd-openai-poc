@@ -350,55 +350,6 @@ _QUIESCENCE_DEADLOCK_SAFETY_S = 12.0
 _WS_MAX_FRAME_BYTES = 2**23
 
 
-def _language_behavior_instruction(provider: str) -> str:
-    """Build the language policy from provider-specific environment variables.
-
-    Supported variables (provider is ``openai`` or ``gemini``):
-      * ``<PROVIDER>_LANGUAGE_MODE``: ``auto`` (default) or ``fixed``
-      * ``<PROVIDER>_SUPPORTED_LANGUAGES``: comma-separated allow-list for auto mode
-      * ``<PROVIDER>_FIXED_LANGUAGE``: language used in fixed mode
-
-    The prompt instruction is appended after the configured system prompt so
-    language policy is explicit without replacing existing ITSD tools or rules.
-    """
-    prefix = provider.upper()
-    mode = os.getenv(f"{prefix}_LANGUAGE_MODE", "auto").strip().lower()
-    if mode not in {"auto", "fixed"}:
-        logger.warning("Invalid %s_LANGUAGE_MODE=%r; using auto", prefix, mode)
-        mode = "auto"
-
-    if mode == "fixed":
-        fixed_language = os.getenv(f"{prefix}_FIXED_LANGUAGE", "English").strip() or "English"
-        return (
-            "LANGUAGE POLICY (CONFIGURED MODE: FIXED): Respond in "
-            f"{fixed_language} for the entire conversation, even if the caller "
-            "uses another language. Keep employee IDs, email addresses, ticket "
-            "numbers, technical identifiers, and tool arguments unchanged. "
-            "Do not change any existing IT Service Desk tool or handoff behavior."
-        )
-
-    raw_languages = os.getenv(
-        f"{prefix}_SUPPORTED_LANGUAGES", "English,Filipino/Tagalog,Taglish"
-    )
-    languages = [item.strip() for item in raw_languages.split(",") if item.strip()]
-    if not languages:
-        languages = ["English", "Filipino/Tagalog", "Taglish"]
-    supported = ", ".join(languages)
-    return (
-        "LANGUAGE POLICY (CONFIGURED MODE: AUTO): Automatically detect the "
-        "language the caller is speaking from their substantive speech and "
-        "respond naturally in that language. Supported languages: " + supported + ". "
-        "For mixed-language speech, mirror natural code-switching when appropriate. "
-        "Do not infer language from a name, accent, greeting, or isolated word alone. "
-        "If the caller switches language, follow their new language. If the language "
-        "is unclear, ask a short clarification. This auto-detection policy takes "
-        "precedence over any default language or language placeholder elsewhere in "
-        "the prompt. Keep employee IDs, email addresses, ticket numbers, technical "
-        "identifiers, and tool arguments unchanged. Do not change any existing IT "
-        "Service Desk tool or handoff behavior."
-    )
-
-
 def _resolve_language_name(code: str) -> str:
     """Map a BCP-47 / ISO 639-1 language code to a human-readable language name.
 
@@ -1852,8 +1803,32 @@ class OpenAIService(ServicePlugin):
         rendered = base
         for key, value in values.items():
             rendered = rendered.replace("{" + key + "}", str(value or ""))
-        rendered += "\n\n" + _language_behavior_instruction("openai")
-        return rendered
+
+        # Environment-driven language behavior. This appended policy explicitly
+        # overrides legacy prompt wording that might otherwise force English.
+        mode = os.getenv("OPENAI_LANGUAGE_MODE", "auto").strip().lower()
+        supported = os.getenv(
+            "OPENAI_SUPPORTED_LANGUAGES", "English,Filipino/Tagalog,Taglish"
+        ).strip()
+        fixed_language = os.getenv("OPENAI_FIXED_LANGUAGE", "English").strip() or "English"
+        if mode == "fixed":
+            language_policy = (
+                "\n\nLANGUAGE POLICY (CONFIGURED): Respond only in "
+                f"{fixed_language}. This setting overrides conflicting language wording above. "
+                "Keep technical identifiers, employee IDs, email addresses, and ticket numbers unchanged."
+            )
+        else:
+            language_policy = (
+                "\n\nLANGUAGE POLICY (AUTOMATIC): Detect the caller's preferred language from "
+                "their substantive spoken words and respond in that language. Supported languages: "
+                f"{supported}. If the caller speaks Filipino/Tagalog, respond in natural Filipino; "
+                "if they speak Taglish, respond in natural Taglish; if they speak English, respond in English. "
+                "Follow language switches naturally. Do not force English merely because the workflow language "
+                "variable says English. Treat that variable as an initial preference, not a restriction. "
+                "This policy overrides conflicting language instructions above. Preserve all tool calls, "
+                "business rules, and LIVE_AGENT_HANDOFF behavior; do not translate IDs or tool arguments."
+            )
+        return rendered + language_policy
 
     # ---------------------------------------------------------------- bot.end
 
